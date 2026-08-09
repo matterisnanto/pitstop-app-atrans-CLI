@@ -127,3 +127,32 @@ def simpan_interval_khusus(nopol, interval):
     conn.commit()
     conn.close()
     print(f"[SUCCESS] Interval khusus {interval} KM untuk mobil {nopol} berhasil disimpan permanen!")
+
+def get_daftar_driver_terbaru():
+    conn = get_connection()
+    query = """
+        WITH RankedHandovers AS (
+            SELECT 
+                nopol, 
+                name, 
+                phone,
+                createdate,
+                ROW_NUMBER() OVER(PARTITION BY nopol ORDER BY createdate DESC) as rn
+            FROM handovers
+        )
+        SELECT 
+            h.nopol, 
+            h.name, 
+            h.phone,
+            COALESCE(v."Brand", '') AS brand, 
+            COALESCE(v."Series", '') AS series,
+            COALESCE(v."GSM SERVER", 'Kosong') AS gps,
+            h.createdate AS tgl_handover
+        FROM RankedHandovers h
+        LEFT JOIN vehicles v ON h.nopol = v."Nomor Polisi"
+        WHERE h.rn = 1
+        ORDER BY h.createdate DESC
+    """
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
