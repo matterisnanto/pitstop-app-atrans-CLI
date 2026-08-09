@@ -2,17 +2,25 @@ import pandas as pd
 from db_manager import get_connection
 
 def calculate_next_km(row):
-    odo = row['Odometer_Bengkel']
+    # Menggunakan .get() agar tidak crash jika ada kolom yang hilang/berbeda nama
+    odo = row.get('Odometer_Bengkel', 0)
     
     # 1. Prioritas Utama: Interval Khusus (7000/8000)
-    if pd.notna(row.get('interval_km')) and row['interval_km'] > 0:
+    if pd.notna(row.get('interval_km')) and row.get('interval_km', 0) > 0:
         return odo + row['interval_km']
         
-    transmisi = str(row['Transmition']).upper()
-    series = str(row['Series']).upper()
+    # Mengamankan pencarian kolom Transmition dan Series dari Excel
+    # Mengamankan pencarian kolom Transmition dan Series dari Excel
+    transmisi = str(row.get('Transmition', '')).upper()
+    series = str(row.get('Series', '')).upper()
+    brand = str(row.get('Brand', '')).upper() # Tambahkan brand untuk berjaga-jaga
+    
+    # Gabungkan teks pencarian agar lebih aman (berjaga-jaga jika Morris Garage ditulis di kolom Brand)
+    teks_kendaraan = series + " " + brand
     
     # 2. Aturan Bawaan (EV & Matic)
-    if 'EV' in series or 'IONIQ' in series:
+    # Pastikan semuanya HURUF KAPITAL karena kita menggunakan .upper()
+    if 'EV' in teks_kendaraan or 'IONIQ' in teks_kendaraan or 'BYD' in teks_kendaraan or 'VINFAST' in teks_kendaraan or 'MORRIS GARAGE' in teks_kendaraan or 'MG' in teks_kendaraan:
         return odo + 15000
     if 'A/T' in transmisi or 'MATIC' in transmisi:
         return odo + 30000
