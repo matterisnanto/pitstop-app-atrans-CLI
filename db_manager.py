@@ -130,7 +130,9 @@ def simpan_interval_khusus(nopol, interval):
 
 def get_daftar_driver_terbaru():
     conn = get_connection()
-    query = """
+    
+    # Skenario 1: Asumsi kolom 'status' ada di data master Kendaraan (vehicles)
+    query_vehicles = """
         WITH RankedHandovers AS (
             SELECT 
                 nopol, 
@@ -150,9 +152,47 @@ def get_daftar_driver_terbaru():
             h.createdate AS tgl_handover
         FROM RankedHandovers h
         LEFT JOIN vehicles v ON h.nopol = v."Nomor Polisi"
+        WHERE h.rn = 1 
+          AND LOWER(v.status) LIKE '%open%'
+        ORDER BY h.createdate DESC
+    """
+    
+    # Skenario 2: Asumsi kolom 'status' ada di data Serah Terima (handover)
+    query_handover = """
+        WITH RankedHandovers AS (
+            SELECT 
+                nopol, 
+                name, 
+                phone,
+                createdate,
+                ROW_NUMBER() OVER(PARTITION BY nopol ORDER BY createdate DESC) as rn
+            FROM handovers
+            WHERE LOWER(status) LIKE '%open%'
+        )
+        SELECT 
+            h.nopol, 
+            h.name, 
+            h.phone,
+            COALESCE(v."Brand", '') AS brand, 
+            COALESCE(v."Series", '') AS series,
+            COALESCE(v."GSM SERVER", 'Kosong') AS gps,
+            h.createdate AS tgl_handover
+        FROM RankedHandovers h
+        LEFT JOIN vehicles v ON h.nopol = v."Nomor Polisi"
         WHERE h.rn = 1
         ORDER BY h.createdate DESC
     """
-    df = pd.read_sql_query(query, conn)
+    
+    try:
+        # Mencoba Skenario 1 terlebih dahulu (Mencari status 'open' di data mobil)
+        df = pd.read_sql_query(query_vehicles, conn)
+    except:
+        try:
+            # Jika error (kolom status bukan di data mobil), sistem otomatis pakai Skenario 2
+            df = pd.read_sql_query(query_handover, conn)
+        except Exception as e:
+            print(f"\n[ERROR] Kolom 'status' tidak ditemukan! Pastikan ada kolom bernama Status di Excel Anda.\nDetail: {e}")
+            df = pd.DataFrame()
+            
     conn.close()
     return df
