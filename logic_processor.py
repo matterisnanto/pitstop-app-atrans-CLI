@@ -1,109 +1,98 @@
 import pandas as pd
-from db_manager import get_connection
+from db_manager import get_connection, get_daftar_driver_terbaru
 
 def calculate_next_km(row):
-    # Menggunakan .get() agar tidak crash jika ada kolom yang hilang/berbeda nama
     odo = row.get('Odometer_Bengkel', 0)
-    
-    # 1. Prioritas Utama: Interval Khusus (7000/8000)
+    if pd.isna(odo): 
+        odo = 0
+        
     if pd.notna(row.get('interval_km')) and row.get('interval_km', 0) > 0:
         return odo + row['interval_km']
         
-    # Mengamankan pencarian kolom Transmition dan Series dari Excel
-    # Mengamankan pencarian kolom Transmition dan Series dari Excel
     transmisi = str(row.get('Transmition', '')).upper()
-    series = str(row.get('Series', '')).upper()
-    brand = str(row.get('Brand', '')).upper() # Tambahkan brand untuk berjaga-jaga
+    series_val = str(row.get('series', '')).upper()
+    brand_val = str(row.get('brand', '')).upper() 
+    teks_kendaraan = series_val + " " + brand_val
     
-    # Gabungkan teks pencarian agar lebih aman (berjaga-jaga jika Morris Garage ditulis di kolom Brand)
-    teks_kendaraan = series + " " + brand
-    
-    # 2. Aturan Bawaan (EV & Matic)
-    # Pastikan semuanya HURUF KAPITAL karena kita menggunakan .upper()
     if 'EV' in teks_kendaraan or 'IONIQ' in teks_kendaraan or 'BYD' in teks_kendaraan or 'VINFAST' in teks_kendaraan or 'MORRIS GARAGE' in teks_kendaraan or 'MG' in teks_kendaraan:
         return odo + 15000
     if 'A/T' in transmisi or 'MATIC' in transmisi:
         return odo + 30000
         
-    # 3. Default (Manual)
     return odo + 10000
 
-def process_and_export(output_filename="UPDATE_SERVICE_PITSTOP.xlsx"):
+def process_and_export(output_filename="LAPORAN_LENGKAP_PITSTOP.xlsx"):
     conn = get_connection()
     try:
-        # Tarik semua tabel dari SQLite
+        # 1. TARIK DATA
         df_actual = pd.read_sql_query("SELECT * FROM actual_lists", conn)
         df_vehicle = pd.read_sql_query("SELECT * FROM vehicles", conn)
-        df_handover = pd.read_sql_query("SELECT * FROM handovers", conn)
         df_reports = pd.read_sql_query("SELECT * FROM driver_km_reports", conn)
         df_custom = pd.read_sql_query("SELECT * FROM custom_intervals", conn)
         
-        # --- LOGIKA FILTER TERBARU (Sesuai Kategori ERP & Typo) ---
+        # 2. AMBIL DRIVER AKTIF (Paling Update, Tanpa Ganda)
+        df_driver_aktif = get_daftar_driver_terbaru()
+        
+        # 3. FILTER SERVICE BENGKEL TERAKHIR
         df_actual['Category'] = df_actual['Category'].fillna('')
         df_actual['Description'] = df_actual['Description'].fillna('')
         
-        # Ambil SEMUA data yang kategorinya "Tune Up & Ganti Oli"
         mask_kategori_utama = df_actual['Category'].str.contains('Tune Up & Ganti Oli', case=False)
-        
-        # Ambil data dari kategori "Others" TAPI yang deskripsinya mengandung unsur oli/service
         kata_kunci = 'oli|oil|service|servis|berkala|berskska|tune up|flush|shell|idemitsu|fluid'
         mask_kategori_others = df_actual['Category'].str.contains('Others', case=False) & \
                                df_actual['Description'].str.contains(kata_kunci, case=False, regex=True)
                                
-        # Gabungkan kedua kondisi di atas
         df_oli = df_actual[mask_kategori_utama | mask_kategori_others].copy()
-        # ----------------------------------------------------------
-        
-        # Validasi: Buang Odometer 0 (Human error input ERP)
         df_oli['Odometer'] = pd.to_numeric(df_oli['Odometer'], errors='coerce')
         df_oli = df_oli[df_oli['Odometer'] > 0]
         
-        # Ambil 1 record bengkel terbaru per mobil
         df_oli['Actual Date'] = pd.to_datetime(df_oli['Actual Date'], errors='coerce')
         df_latest_service = df_oli.sort_values(by=['Actual Date', 'Odometer'], ascending=[False, False]).drop_duplicates(subset=['No. Pol'])
         df_latest_service.rename(columns={'Odometer': 'Odometer_Bengkel'}, inplace=True)
         
-        # Ambil laporan WA terbaru (jika ada)
+        # 4. FILTER INPUT KM WA TERAKHIR
         if not df_reports.empty:
             df_reports['report_date'] = pd.to_datetime(df_reports['report_date'])
             df_latest_report = df_reports.sort_values('report_date', ascending=False).drop_duplicates('nopol')
         else:
-            df_latest_report = pd.DataFrame(columns=['nopol', 'current_km'])
+            # Pastikan ada kolom report_date meskipun data masih kosong
+            df_latest_report = pd.DataFrame(columns=['nopol', 'current_km', 'report_date'])
 
-        # Ambil driver terbaru dari Handover
-        df_handover['createdate'] = pd.to_datetime(df_handover['createdate'], errors='coerce')
-        df_latest_driver = df_handover.sort_values('createdate', ascending=False).drop_duplicates('nopol')
+        # 5. MERGE KE 1 TABEL LENGKAP
+        df_vehicle_lite = df_vehicle[['Nomor Polisi', 'Transmition']] if 'Transmition' in df_vehicle.columns else pd.DataFrame(columns=['Nomor Polisi'])
         
-        # --- PENGGABUNGAN DATA (MERGE) ---
-        merged = pd.merge(df_latest_service, df_vehicle, left_on='No. Pol', right_on='Nomor Polisi', how='left')
-        merged = pd.merge(merged, df_latest_driver, left_on='No. Pol', right_on='nopol', how='left')
-        merged = pd.merge(merged, df_latest_report, left_on='No. Pol', right_on='nopol', how='left')
-        merged = pd.merge(merged, df_custom, left_on='No. Pol', right_on='nopol', how='left') 
+        merged = pd.merge(df_driver_aktif, df_vehicle_lite, left_on='nopol', right_on='Nomor Polisi', how='left')
+        merged = pd.merge(merged, df_latest_service, left_on='nopol', right_on='No. Pol', how='left')
+        merged = pd.merge(merged, df_latest_report, on='nopol', how='left')
+        merged = pd.merge(merged, df_custom, on='nopol', how='left') 
         
-        # --- HITUNG INTERVAL & SISA KM ---
+        # 6. HITUNG MATEMATIKA
         merged['KM_SELANJUTNYA'] = merged.apply(calculate_next_km, axis=1)
         merged['current_km'] = merged['current_km'].fillna(merged['Odometer_Bengkel'])
         merged['SISA_KM'] = merged['KM_SELANJUTNYA'] - merged['current_km']
         
-        # --- SUSUN LAPORAN EXCEL ---
+        # 7. EXPORT JADI 1 SHEET (Dengan Tambahan TANGGAL UPDATE WA)
         final_report = pd.DataFrame({
-            'TANGGAL SERVICE (BENGKEL)': merged['Actual Date'].dt.strftime('%Y-%m-%d'),
-            'NOPOL': merged['No. Pol'],
-            'DRIVER': merged['name'],
+            'NOPOL': merged['nopol'],
+            'DRIVER AKTIF': merged['name'],
             'PHONE': merged['phone'],
-            'KM SERVICE AWAL': merged['Odometer_Bengkel'],
-            'KM SERVICE SELANJUTNYA': merged['KM_SELANJUTNYA'],
-            'KM UPDATE WA': merged['current_km'],
-            'SISA KM MENUJU SERVICE': merged['SISA_KM'],
+            'UNIT KENDARAAN': merged['brand'] + " " + merged['series'],
+            'GPS': merged['gps'],
+            'TANGGAL HANDOVER TERBARU': pd.to_datetime(merged['tgl_handover']).dt.strftime('%Y-%m-%d').fillna('-'),
+            'KM SERVICE AWAL': merged['Odometer_Bengkel'].fillna(0),
+            'KM SERVICE SELANJUTNYA': merged['KM_SELANJUTNYA'].fillna(0),
+            'TANGGAL UPDATE WA': pd.to_datetime(merged['report_date']).dt.strftime('%Y-%m-%d %H:%M').fillna('-'), # KOLOM BARU
+            'KM UPDATE WA': merged['current_km'].fillna(0),
+            'SISA KM MENUJU SERVICE': merged['SISA_KM'].fillna(0),
             'ATURAN INTERVAL': merged['interval_km'].fillna('Default/Sistem'),
-            'KETERANGAN BENGKEL': merged['Description'],
-            'GPS': merged['GSM SERVER']
+            'TANGGAL SERVICE (BENGKEL)': merged['Actual Date'].dt.strftime('%Y-%m-%d').fillna('Belum Ada Data'),
+            'KETERANGAN BENGKEL': merged['Description'].fillna('-')
         })
         
         final_report.to_excel(output_filename, index=False)
-        print(f"\n[SUCCESS] Laporan diekspor ke: {output_filename}")
+        print(f"\n[SUCCESS] Laporan Terpadu berhasil diekspor ke: {output_filename}")
         
     except Exception as e:
-        print(f"[ERROR] Kegagalan proses: {e}")
+        print(f"[ERROR] Kegagalan proses export: {e}")
     finally:
         conn.close()

@@ -4,7 +4,7 @@ import os
 import warnings
 from datetime import datetime
 
-# Membungkam peringatan Pandas agar terminal Anda tetap bersih
+# Membungkam peringatan Pandas agar tampilan terminal tetap bersih
 warnings.filterwarnings('ignore', category=UserWarning)
 
 DB_NAME = 'pitstop.db'
@@ -35,18 +35,19 @@ def init_db():
 
 def import_file_to_db(filepath, table_name):
     if not os.path.exists(filepath):
-        print(f"[ERROR] File {filepath} tidak ditemukan! Cek kembali nama dan folder.")
+        print(f"[ERROR] File {filepath} tidak ditemukan! Cek kembali folder dan nama file.")
         return False
     try:
+        # Menangani format ekspor ERP (HTML masquerading as XLS, XLS lama, atau XLSX baru)
         try:
             df = pd.read_html(filepath)[0]
-        except:
+        except Exception:
             try:
                 df = pd.read_excel(filepath, engine='xlrd')
-            except:
+            except Exception:
                 df = pd.read_excel(filepath, engine='openpyxl')
         
-        # Format tanggal diseragamkan
+        # Standarisasi format kolom tanggal
         if 'createdate' in df.columns:
             df['createdate'] = pd.to_datetime(df['createdate'], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
         if 'Actual Date' in df.columns:
@@ -55,7 +56,7 @@ def import_file_to_db(filepath, table_name):
         conn = get_connection()
         df.to_sql(table_name, conn, if_exists='replace', index=False)
         conn.close()
-        print(f"[SUCCESS] Import {len(df)} baris ke '{table_name}'.")
+        print(f"[SUCCESS] Import {len(df)} baris ke tabel '{table_name}'.")
         return True
     except Exception as e:
         print(f"[ERROR] Gagal membaca {filepath}: {e}")
@@ -63,13 +64,14 @@ def import_file_to_db(filepath, table_name):
 
 def cari_kendaraan(keyword):
     conn = get_connection()
-    keyword = f"%{keyword}%"
+    param = f"%{keyword}%"
     
     query = """
         WITH RankedHandovers AS (
             SELECT 
                 nopol, 
                 name, 
+                phone,
                 createdate,
                 ROW_NUMBER() OVER(PARTITION BY nopol ORDER BY createdate DESC) as rn
             FROM handovers
@@ -79,19 +81,19 @@ def cari_kendaraan(keyword):
             h.name, 
             COALESCE(v."Brand", '') AS brand, 
             COALESCE(v."Series", '') AS series,
+            COALESCE(v."GSM SERVER", 'Kosong') AS gps,  -- BARIS INI DITAMBAHKAN
             h.createdate AS tgl_handover
         FROM RankedHandovers h
         LEFT JOIN vehicles v ON h.nopol = v."Nomor Polisi"
         WHERE h.rn = 1 AND (h.nopol LIKE ? OR h.name LIKE ?)
         ORDER BY h.createdate DESC
     """
-    df = pd.read_sql_query(query, conn, params=(keyword, keyword))
+    df = pd.read_sql_query(query, conn, params=(param, param))
     conn.close()
     return df
 
 def get_km_bengkel_terakhir(nopol):
     conn = get_connection()
-    # Logika disamakan dengan export: Mengandalkan Category ERP dan kata OIL/OLI
     query = """
         SELECT Odometer FROM actual_lists 
         WHERE "No. Pol" = ? 
@@ -102,7 +104,8 @@ def get_km_bengkel_terakhir(nopol):
               OR Description LIKE '%service%'
           )
           AND CAST(Odometer AS INTEGER) > 0
-        ORDER BY "Actual Date" DESC, CAST(Odometer AS INTEGER) DESC LIMIT 1
+        ORDER BY "Actual Date" DESC, CAST(Odometer AS INTEGER) DESC 
+        LIMIT 1
     """
     cursor = conn.cursor()
     cursor.execute(query, (nopol,))
@@ -110,12 +113,32 @@ def get_km_bengkel_terakhir(nopol):
     conn.close()
     return int(result[0]) if result else 0
 
+def get_km_wa_terakhir(nopol):
+    conn = get_connection()
+    query = """
+        SELECT current_km, report_date FROM driver_km_reports 
+        WHERE nopol = ? 
+        ORDER BY report_date DESC LIMIT 1
+    """
+    cursor = conn.cursor()
+    cursor.execute(query, (nopol,))
+    result = cursor.fetchone()
+    conn.close()
+    
+    # Mengembalikan nilai berupa kamus (dictionary) berisi KM dan Tanggal
+    if result:
+        return {"km": int(result[0]), "tanggal": result[1]}
+    else:
+        return {"km": 0, "tanggal": "-"}
+
 def simpan_km_harian(nopol, km_terbaru):
     conn = get_connection()
     cursor = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute("INSERT INTO driver_km_reports (nopol, current_km, report_date) VALUES (?, ?, ?)", 
-                   (nopol, km_terbaru, now))
+    cursor.execute(
+        "INSERT INTO driver_km_reports (nopol, current_km, report_date) VALUES (?, ?, ?)", 
+        (nopol, km_terbaru, now)
+    )
     conn.commit()
     conn.close()
     print(f"[SUCCESS] Data KM {km_terbaru} untuk unit {nopol} berhasil disimpan!")
@@ -123,16 +146,17 @@ def simpan_km_harian(nopol, km_terbaru):
 def simpan_interval_khusus(nopol, interval):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("REPLACE INTO custom_intervals (nopol, interval_km) VALUES (?, ?)", (nopol, interval))
+    cursor.execute(
+        "REPLACE INTO custom_intervals (nopol, interval_km) VALUES (?, ?)", 
+        (nopol, interval)
+    )
     conn.commit()
     conn.close()
     print(f"[SUCCESS] Interval khusus {interval} KM untuk mobil {nopol} berhasil disimpan permanen!")
 
 def get_daftar_driver_terbaru():
     conn = get_connection()
-    
-    # Skenario 1: Asumsi kolom 'status' ada di data master Kendaraan (vehicles)
-    query_vehicles = """
+    query = """
         WITH RankedHandovers AS (
             SELECT 
                 nopol, 
@@ -151,48 +175,16 @@ def get_daftar_driver_terbaru():
             COALESCE(v."GSM SERVER", 'Kosong') AS gps,
             h.createdate AS tgl_handover
         FROM RankedHandovers h
-        LEFT JOIN vehicles v ON h.nopol = v."Nomor Polisi"
+        JOIN vehicles v ON h.nopol = v."Nomor Polisi"
         WHERE h.rn = 1 
-          AND LOWER(v.status) LIKE '%open%'
+          AND LOWER(v.Status) LIKE '%open%'
         ORDER BY h.createdate DESC
     """
-    
-    # Skenario 2: Asumsi kolom 'status' ada di data Serah Terima (handover)
-    query_handover = """
-        WITH RankedHandovers AS (
-            SELECT 
-                nopol, 
-                name, 
-                phone,
-                createdate,
-                ROW_NUMBER() OVER(PARTITION BY nopol ORDER BY createdate DESC) as rn
-            FROM handovers
-            WHERE LOWER(status) LIKE '%open%'
-        )
-        SELECT 
-            h.nopol, 
-            h.name, 
-            h.phone,
-            COALESCE(v."Brand", '') AS brand, 
-            COALESCE(v."Series", '') AS series,
-            COALESCE(v."GSM SERVER", 'Kosong') AS gps,
-            h.createdate AS tgl_handover
-        FROM RankedHandovers h
-        LEFT JOIN vehicles v ON h.nopol = v."Nomor Polisi"
-        WHERE h.rn = 1
-        ORDER BY h.createdate DESC
-    """
-    
     try:
-        # Mencoba Skenario 1 terlebih dahulu (Mencari status 'open' di data mobil)
-        df = pd.read_sql_query(query_vehicles, conn)
-    except:
-        try:
-            # Jika error (kolom status bukan di data mobil), sistem otomatis pakai Skenario 2
-            df = pd.read_sql_query(query_handover, conn)
-        except Exception as e:
-            print(f"\n[ERROR] Kolom 'status' tidak ditemukan! Pastikan ada kolom bernama Status di Excel Anda.\nDetail: {e}")
-            df = pd.DataFrame()
-            
+        df = pd.read_sql_query(query, conn)
+    except Exception as e:
+        print(f"\n[ERROR] Gagal mengambil data driver: {e}")
+        df = pd.DataFrame()
+        
     conn.close()
     return df
