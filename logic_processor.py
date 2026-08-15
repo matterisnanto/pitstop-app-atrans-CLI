@@ -81,8 +81,8 @@ def process_and_export(output_filename="LAPORAN_LENGKAP_PITSTOP.xlsx"):
             'TANGGAL HANDOVER TERBARU': pd.to_datetime(merged['tgl_handover']).dt.strftime('%Y-%m-%d').fillna('-'),
             'KM SERVICE AWAL': merged['Odometer_Bengkel'].fillna(0),
             'KM SERVICE SELANJUTNYA': merged['KM_SELANJUTNYA'].fillna(0),
-            'TANGGAL UPDATE WA': pd.to_datetime(merged['report_date']).dt.strftime('%Y-%m-%d %H:%M').fillna('-'), # KOLOM BARU
             'KM UPDATE WA': merged['current_km'].fillna(0),
+            'TANGGAL UPDATE WA': pd.to_datetime(merged['report_date']).dt.strftime('%Y-%m-%d %H:%M').fillna('-'), # KOLOM BARU
             'SISA KM MENUJU SERVICE': merged['SISA_KM'].fillna(0),
             'ATURAN INTERVAL': merged['interval_km'].fillna('Default/Sistem'),
             'TANGGAL SERVICE (BENGKEL)': merged['Actual Date'].dt.strftime('%Y-%m-%d').fillna('Belum Ada Data'),
